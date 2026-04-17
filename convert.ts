@@ -81,10 +81,11 @@ export function convertPiMessages(
 			if (!blocks.length) blocks.push({ type: "text", text: "[incompatible content omitted]" });
 			anthropicMessages.push({ role: "assistant", content: blocks });
 		} else if (msg.role === "toolResult") {
+			if (!msg.toolCallId) continue;
 			const text = typeof msg.content === "string" ? msg.content : messageContentToText(msg.content);
 			anthropicMessages.push({
 				role: "user",
-				content: [{ type: "tool_result", tool_use_id: sanitizeToolId(msg.toolCallId!, sanitizedIds), content: text || "", is_error: msg.isError }],
+				content: [{ type: "tool_result", tool_use_id: sanitizeToolId(msg.toolCallId, sanitizedIds), content: text || "", is_error: msg.isError }],
 			});
 		}
 	}

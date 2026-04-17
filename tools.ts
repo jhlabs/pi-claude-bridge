@@ -164,13 +164,13 @@ export function buildMcpServer(
 		inputSchema: jsonSchemaToZodShape(tool.parameters),
 		handler: async () => {
 			const toolCallId = queryCtx.turnToolCallIds[queryCtx.nextHandlerIdx++];
-			// Check if result already arrived before handler was called
-			if (toolCallId && queryCtx.pendingResults.has(toolCallId)) {
-				const result = queryCtx.pendingResults.get(toolCallId)!;
-				queryCtx.pendingResults.delete(toolCallId);
-				return result;
+			if (toolCallId) {
+				const ready = queryCtx.pendingResults.get(toolCallId);
+				if (ready) {
+					queryCtx.pendingResults.delete(toolCallId);
+					return ready;
+				}
 			}
-			// Block until pi delivers the tool result
 			return new Promise<McpResult>((resolve) => {
 				queryCtx.pendingToolCalls.set(toolCallId, { toolName: tool.name, resolve });
 			});

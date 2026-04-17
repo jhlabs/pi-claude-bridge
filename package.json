@@ -1,8 +1,23 @@
 {
   "name": "pi-claude-bridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
+  "description": "A pi extension exposing Anthropic's latest Claude models (Opus 4.7, Opus 4.6, Sonnet 4.6, Haiku 4.5) through the Claude Agent SDK.",
   "type": "module",
-  "keywords": ["pi-package", "pi", "extension"],
+  "license": "MIT",
+  "author": "Johannes Herrmann <johannes@jhlabs.io>",
+  "homepage": "https://github.com/jhlabs/pi-claude-bridge",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jhlabs/pi-claude-bridge.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jhlabs/pi-claude-bridge/issues"
+  },
+  "keywords": ["pi-package", "pi", "extension", "claude", "anthropic", "agent-sdk"],
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "bun x tsc --noEmit --target esnext --module esnext --moduleResolution bundler --strict --skipLibCheck --esModuleInterop convert.ts session.ts tools.ts stream.ts models.ts index.ts debug.ts types.ts"
+  },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.112",
     "@anthropic-ai/sdk": "^0.73.0",
@@ -13,5 +28,8 @@
   "peerDependencies": {
     "@mariozechner/pi-ai": ">=0.67.0",
     "@mariozechner/pi-coding-agent": ">=0.66.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.12"
   }
 }

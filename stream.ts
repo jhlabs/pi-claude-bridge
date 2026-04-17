@@ -164,10 +164,12 @@ function pushContext(): void {
 }
 
 function popContext(): void {
-	if (contextStack.length === 0) throw new Error("popContext with empty stack");
 	const parent = contextStack[contextStack.length - 1];
+	if (!parent) throw new Error("popContext with empty stack");
 	parent.deferredUserMessages.push(..._ctx.deferredUserMessages);
-	_ctx = contextStack.pop()!;
+	const popped = contextStack.pop();
+	if (!popped) throw new Error("popContext: stack drained between peek and pop");
+	_ctx = popped;
 }
 
 // --- Shared state ---
@@ -190,11 +192,13 @@ function ensureTurnStarted(): void {
 
 function finalizeCurrentStream(stopReason?: string): void {
 	const c = ctx();
-	if (!c.currentPiStream || !c.turnOutput) return;
+	const stream = c.currentPiStream;
+	const out = c.turnOutput;
+	if (!stream || !out) return;
 	if (!c.turnStarted) ensureTurnStarted();
 	const reason = stopReason === "length" ? "length" : "stop";
-	c.currentPiStream.push({ type: "done", reason, message: c.turnOutput! });
-	c.currentPiStream.end();
+	stream.push({ type: "done", reason, message: out });
+	stream.end();
 	c.currentPiStream = null;
 }
 
@@ -209,14 +213,16 @@ function processStreamEvent(
 	model: Model<any>,
 ): void {
 	const c = ctx();
-	if (!c.currentPiStream || !c.turnOutput) return;
+	const stream = c.currentPiStream;
+	const out = c.turnOutput;
+	if (!stream || !out) return;
 	c.turnSawStreamEvent = true;
 	const event = (message as any).event;
 
 	if (event?.type === "message_start") {
 		c.turnToolCallIds = [];
 		c.nextHandlerIdx = 0;
-		if (event.message?.usage) updateUsage(c.turnOutput, event.message.usage, model);
+		if (event.message?.usage) updateUsage(out, event.message.usage, model);
 		return;
 	}
 
@@ -224,10 +230,10 @@ function processStreamEvent(
 		ensureTurnStarted();
 		if (event.content_block?.type === "text") {
 			c.turnBlocks.push({ type: "text", text: "", index: event.index });
-			c.currentPiStream!.push({ type: "text_start", contentIndex: c.turnBlocks.length - 1, partial: c.turnOutput });
+			stream.push({ type: "text_start", contentIndex: c.turnBlocks.length - 1, partial: out });
 		} else if (event.content_block?.type === "thinking") {
 			c.turnBlocks.push({ type: "thinking", thinking: "", thinkingSignature: "", index: event.index });
-			c.currentPiStream!.push({ type: "thinking_start", contentIndex: c.turnBlocks.length - 1, partial: c.turnOutput });
+			stream.push({ type: "thinking_start", contentIndex: c.turnBlocks.length - 1, partial: out });
 		} else if (event.content_block?.type === "tool_use") {
 			c.turnSawToolCall = true;
 			c.turnToolCallIds.push(event.content_block.id);
@@ -237,7 +243,7 @@ function processStreamEvent(
 				arguments: (event.content_block.input as Record<string, unknown>) ?? {},
 				partialJson: "", index: event.index,
 			});
-			c.currentPiStream!.push({ type: "toolcall_start", contentIndex: c.turnBlocks.length - 1, partial: c.turnOutput });
+			stream.push({ type: "toolcall_start", contentIndex: c.turnBlocks.length - 1, partial: out });
 		}
 		return;
 	}
@@ -248,14 +254,14 @@ function processStreamEvent(
 		if (!block) return;
 		if (event.delta?.type === "text_delta" && block.type === "text") {
 			block.text += event.delta.text;
-			c.currentPiStream!.push({ type: "text_delta", contentIndex: index, delta: event.delta.text, partial: c.turnOutput });
+			stream.push({ type: "text_delta", contentIndex: index, delta: event.delta.text, partial: out });
 		} else if (event.delta?.type === "thinking_delta" && block.type === "thinking") {
 			block.thinking += event.delta.thinking;
-			c.currentPiStream!.push({ type: "thinking_delta", contentIndex: index, delta: event.delta.thinking, partial: c.turnOutput });
+			stream.push({ type: "thinking_delta", contentIndex: index, delta: event.delta.thinking, partial: out });
 		} else if (event.delta?.type === "input_json_delta" && block.type === "toolCall") {
 			block.partialJson += event.delta.partial_json;
 			block.arguments = parsePartialJson(block.partialJson, block.arguments);
-			c.currentPiStream!.push({ type: "toolcall_delta", contentIndex: index, delta: event.delta.partial_json, partial: c.turnOutput });
+			stream.push({ type: "toolcall_delta", contentIndex: index, delta: event.delta.partial_json, partial: out });
 		} else if (event.delta?.type === "signature_delta" && block.type === "thinking") {
 			block.thinkingSignature = (block.thinkingSignature ?? "") + event.delta.signature;
 		}
@@ -268,28 +274,28 @@ function processStreamEvent(
 		if (!block) return;
 		delete block.index;
 		if (block.type === "text") {
-			c.currentPiStream!.push({ type: "text_end", contentIndex: index, content: block.text, partial: c.turnOutput });
+			stream.push({ type: "text_end", contentIndex: index, content: block.text, partial: out });
 		} else if (block.type === "thinking") {
-			c.currentPiStream!.push({ type: "thinking_end", contentIndex: index, content: block.thinking, partial: c.turnOutput });
+			stream.push({ type: "thinking_end", contentIndex: index, content: block.thinking, partial: out });
 		} else if (block.type === "toolCall") {
 			c.turnSawToolCall = true;
 			block.arguments = mapToolArgs(block.name, parsePartialJson(block.partialJson, block.arguments));
 			delete block.partialJson;
-			c.currentPiStream!.push({ type: "toolcall_end", contentIndex: index, toolCall: block, partial: c.turnOutput });
+			stream.push({ type: "toolcall_end", contentIndex: index, toolCall: block, partial: out });
 		}
 		return;
 	}
 
 	if (event?.type === "message_delta") {
-		c.turnOutput.stopReason = mapStopReason(event.delta?.stop_reason);
-		if (event.usage) updateUsage(c.turnOutput, event.usage, model);
+		out.stopReason = mapStopReason(event.delta?.stop_reason);
+		if (event.usage) updateUsage(out, event.usage, model);
 		return;
 	}
 
 	if (event?.type === "message_stop" && c.turnSawToolCall) {
-		c.turnOutput.stopReason = "toolUse";
-		c.currentPiStream!.push({ type: "done", reason: "toolUse", message: c.turnOutput });
-		c.currentPiStream!.end();
+		out.stopReason = "toolUse";
+		stream.push({ type: "done", reason: "toolUse", message: out });
+		stream.end();
 		c.currentPiStream = null;
 		return;
 	}
@@ -425,12 +431,13 @@ export function streamBridge(
 
 		for (const result of allResults) {
 			const id = result.toolCallId;
-			if (id && ctx().pendingToolCalls.has(id)) {
-				const pending = ctx().pendingToolCalls.get(id)!;
+			if (!id) continue;
+			const pending = ctx().pendingToolCalls.get(id);
+			if (pending) {
 				ctx().pendingToolCalls.delete(id);
 				debug(`resolved ${pending.toolName} [${id}]`);
 				pending.resolve(result);
-			} else if (id) {
+			} else {
 				ctx().pendingResults.set(id, result);
 				debug(`queued result [${id}]`);
 			}
@@ -458,7 +465,7 @@ export function streamBridge(
 		const c = ctx();
 		queueMicrotask(() => {
 			c.resetTurnState(model);
-			stream.push({ type: "done", reason: "stop", message: c.turnOutput! });
+			if (c.turnOutput) stream.push({ type: "done", reason: "stop", message: c.turnOutput });
 			stream.end();
 		});
 		return stream;
@@ -563,7 +570,8 @@ export function streamBridge(
 			// Replay deferred user messages (steers during tool execution)
 			try {
 				while (ctx().deferredUserMessages.length > 0 && !isReentrant && !wasAborted) {
-					const steerPrompt = ctx().deferredUserMessages.shift()!;
+					const steerPrompt = ctx().deferredUserMessages.shift();
+					if (!steerPrompt) break;
 					debug(`replaying deferred steer: ${steerPrompt.slice(0, 60)}`);
 					ctx().resetTurnState(model);
 

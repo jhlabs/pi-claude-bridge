@@ -46,15 +46,15 @@ export function syncSession(
 	}
 
 	// Wipe old session if reusing ID (not after abort — rotate to avoid race)
-	const preserveId = state != null && !state.needsRebuild;
-	if (preserveId) {
-		deleteSession(state!.sessionId, cwd, process.env.CLAUDE_CONFIG_DIR);
+	const preservedState = state && !state.needsRebuild ? state : null;
+	if (preservedState) {
+		deleteSession(preservedState.sessionId, cwd, process.env.CLAUDE_CONFIG_DIR);
 	}
 
 	const session = createSession({
 		projectPath: cwd,
 		claudeDir: process.env.CLAUDE_CONFIG_DIR,
-		...(preserveId ? { sessionId: state!.sessionId } : {}),
+		...(preservedState ? { sessionId: preservedState.sessionId } : {}),
 		...(modelId ? { model: modelId } : {}),
 	});
 
@@ -71,7 +71,7 @@ export function syncSession(
 
 	if (!state) {
 		debug(`session: first turn, ${priorMessages.length} prior messages → ${session.sessionId.slice(0, 8)}`);
-	} else if (preserveId) {
+	} else if (preservedState) {
 		debug(`session: rebuild (diverged), ${priorMessages.length} messages → ${session.sessionId.slice(0, 8)} (same id)`);
 	} else {
 		debug(`session: rebuild post-abort, ${priorMessages.length} messages → ${session.sessionId.slice(0, 8)} (rotated from ${state.sessionId.slice(0, 8)})`);
