@@ -14,9 +14,12 @@
     "url": "https://github.com/jhlabs/pi-claude-bridge/issues"
   },
   "keywords": ["pi-package", "pi", "extension", "claude", "anthropic", "agent-sdk"],
+  "pi": {
+    "extensions": ["src/index.ts"]
+  },
   "scripts": {
     "test": "bun test",
-    "typecheck": "bun x tsc --noEmit --target esnext --module esnext --moduleResolution bundler --strict --skipLibCheck --esModuleInterop convert.ts session.ts tools.ts stream.ts models.ts index.ts debug.ts types.ts"
+    "typecheck": "bun x tsc --noEmit"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.112",
