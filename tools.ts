@@ -1,7 +1,7 @@
 import { createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import type { Tool } from "@mariozechner/pi-ai";
-import type { QueryContext } from "./stream.js";
+import type { McpToolBridgeState } from "./types.js";
 
 export const MCP_SERVER_NAME = "custom-tools";
 export const MCP_TOOL_PREFIX = `mcp__${MCP_SERVER_NAME}__`;
@@ -154,7 +154,7 @@ export interface PendingToolCall { toolName: string; resolve: (result: McpResult
 
 export function buildMcpServer(
 	tools: Tool[],
-	queryCtx: QueryContext,
+	queryCtx: McpToolBridgeState,
 ): Record<string, ReturnType<typeof createSdkMcpServer>> | undefined {
 	if (!tools.length) return undefined;
 
