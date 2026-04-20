@@ -375,7 +375,16 @@ async function consumeQuery(
 				break;
 			case "result": {
 				const rc = ctx();
-				if (!rc.turnSawStreamEvent && message.subtype === "success" && rc.turnOutput) {
+				const isError = (message as any).is_error === true;
+				// Capture the error text so isContextOverflow can detect overflow even when
+				// the SDK's thrown wrapper error is missed downstream.
+				if (isError && rc.turnOutput && !rc.turnOutput.errorMessage) {
+					const text = (message as any).result;
+					if (typeof text === "string" && text.length > 0) rc.turnOutput.errorMessage = text;
+				}
+				// Only synthesize a text block for non-streaming successes. Error results get
+				// their text from the synthetic assistant message; pushing here would duplicate.
+				if (!rc.turnSawStreamEvent && message.subtype === "success" && !isError && rc.turnOutput) {
 					ensureTurnStarted();
 					const text = (message as any).result || "";
 					rc.turnBlocks.push({ type: "text", text });
@@ -409,6 +418,147 @@ async function consumeQuery(
 	return { capturedSessionId };
 }
 
+// --- Summarization slim path ---
+
+// pi-coding-agent sends compaction summarizations via completeSimple() with a distinct
+// system prompt. Re-entering the full bridge flow for these calls loads Claude Code's
+// default system prompt, skills, MCP tools, and the resumed session — none of which
+// the summarization needs, and which eat enough context to make the summarization call
+// itself overflow on large sessions. We detect the request by system-prompt prefix and
+// route to a minimal SDK query that uses a string systemPrompt (replacing the preset)
+// and no tools/MCP/resume.
+const SUMMARIZATION_PROMPT_PREFIX = "You are a context summarization assistant";
+
+function isSummarizationRequest(context: Context): boolean {
+	const sp = context.systemPrompt;
+	return typeof sp === "string" && sp.startsWith(SUMMARIZATION_PROMPT_PREFIX);
+}
+
+function streamSummarization(
+	model: Model<any>,
+	context: Context,
+	options?: SimpleStreamOptions,
+): AssistantMessageEventStream {
+	const stream = createAssistantMessageEventStream();
+	const out: AssistantMessage = {
+		role: "assistant",
+		content: [{ type: "text", text: "" }],
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		usage: {
+			input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: Date.now(),
+	} as AssistantMessage;
+
+	const userText = extractUserPrompt(context.messages) ?? "";
+	const effort = options?.reasoning ? REASONING_TO_EFFORT[options.reasoning] : undefined;
+
+	debug(`streamSummarization: prompt=${userText.length} chars, model=${model.id}, effort=${effort ?? "default"}`);
+
+	const sdkQuery = query({
+		prompt: userText,
+		options: {
+			systemPrompt: context.systemPrompt ?? SUMMARIZATION_PROMPT_PREFIX,
+			allowedTools: [],
+			disallowedTools: DISALLOWED_BUILTIN_TOOLS,
+			permissionMode: "bypassPermissions" as const,
+			includePartialMessages: true,
+			extraArgs: { model: model.id },
+			...(effort ? { effort } : {}),
+		},
+	});
+
+	let aborted = false;
+	const onAbort = () => {
+		aborted = true;
+		void sdkQuery.interrupt().catch(() => {});
+		try { sdkQuery.close(); } catch {}
+	};
+	if (options?.signal) {
+		if (options.signal.aborted) onAbort();
+		else options.signal.addEventListener("abort", onAbort, { once: true });
+	}
+
+	const textBlock = out.content[0] as { type: "text"; text: string };
+
+	(async () => {
+		stream.push({ type: "start", partial: out });
+		stream.push({ type: "text_start", contentIndex: 0, partial: out });
+		let errorText: string | undefined;
+
+		try {
+			for await (const message of sdkQuery) {
+				if (aborted) break;
+
+				if (message.type === "stream_event") {
+					const event = (message as any).event;
+					if (event?.type === "message_start" && event.message?.usage) {
+						updateUsage(out, event.message.usage, model);
+					} else if (event?.type === "content_block_delta" && event.delta?.type === "text_delta") {
+						textBlock.text += event.delta.text;
+						stream.push({ type: "text_delta", contentIndex: 0, delta: event.delta.text, partial: out });
+					} else if (event?.type === "message_delta") {
+						if (event.delta?.stop_reason) out.stopReason = mapStopReason(event.delta.stop_reason);
+						if (event.usage) updateUsage(out, event.usage, model);
+					}
+				} else if (message.type === "assistant") {
+					const assistantMsg = (message as any).message;
+					if (textBlock.text.length === 0 && Array.isArray(assistantMsg?.content)) {
+						for (const block of assistantMsg.content) {
+							if (block.type === "text" && block.text) {
+								textBlock.text += block.text;
+								stream.push({ type: "text_delta", contentIndex: 0, delta: block.text, partial: out });
+							}
+						}
+					}
+					if (assistantMsg?.usage) updateUsage(out, assistantMsg.usage, model);
+				} else if (message.type === "result") {
+					const isError = (message as any).is_error === true;
+					const resultText = (message as any).result;
+					if (isError && typeof resultText === "string" && resultText.length > 0) {
+						errorText = resultText;
+					} else if (textBlock.text.length === 0 && message.subtype === "success" && typeof resultText === "string") {
+						textBlock.text = resultText;
+						stream.push({ type: "text_delta", contentIndex: 0, delta: resultText, partial: out });
+					}
+				}
+			}
+
+			stream.push({ type: "text_end", contentIndex: 0, content: textBlock.text, partial: out });
+
+			if (aborted) {
+				out.stopReason = "aborted";
+				out.errorMessage = "Operation aborted";
+				stream.push({ type: "error", reason: "aborted", error: out });
+			} else if (errorText) {
+				out.stopReason = "error";
+				out.errorMessage = errorText;
+				stream.push({ type: "error", reason: "error", error: out });
+			} else {
+				stream.push({ type: "done", reason: "stop", message: out });
+			}
+			stream.end();
+		} catch (error) {
+			debug("streamSummarization error:", error);
+			stream.push({ type: "text_end", contentIndex: 0, content: textBlock.text, partial: out });
+			const reason: "aborted" | "error" = aborted || options?.signal?.aborted ? "aborted" : "error";
+			out.stopReason = reason;
+			out.errorMessage = error instanceof Error ? error.message : String(error);
+			stream.push({ type: "error", reason, error: out });
+			stream.end();
+		} finally {
+			if (options?.signal) options.signal.removeEventListener("abort", onAbort);
+			try { sdkQuery.close(); } catch {}
+		}
+	})();
+
+	return stream;
+}
+
 // --- Main entry point ---
 
 export function streamBridge(
@@ -416,6 +566,10 @@ export function streamBridge(
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
+	if (isSummarizationRequest(context)) {
+		return streamSummarization(model, context, options);
+	}
+
 	const stream = createAssistantMessageEventStream();
 	const lastMsgRole = context.messages[context.messages.length - 1]?.role;
 
